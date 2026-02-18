@@ -6,14 +6,17 @@ import re
 from typing import Dict, List
 
 # ==============================
-# CONFIG
+# PAGE CONFIG
 # ==============================
 
 st.set_page_config(page_title="MedBill Guard AI", layout="centered")
 st.title("🏥 MedBill Guard AI")
-st.write("AI-Powered Hospital Bill OCR & Validation System")
+st.write("AI-Powered Hospital Bill OCR & Smart Validation System")
 
-# Initialize OCR reader (loads once)
+# ==============================
+# LOAD OCR MODEL
+# ==============================
+
 @st.cache_resource
 def load_reader():
     return easyocr.Reader(['en'])
@@ -24,79 +27,116 @@ reader = load_reader()
 # OCR FUNCTION
 # ==============================
 
-def extract_text_from_image(path):
+def extract_text(path):
     results = reader.readtext(path)
-    return " ".join([text[1] for text in results])
+    return "\n".join([text[1] for text in results])
 
 # ==============================
-# DATA EXTRACTION
+# SMART FIELD EXTRACTION
 # ==============================
-
-def extract_line_items(text: str):
-    items = []
-    pattern = r"(\d+)\s+([A-Za-z ]+)\s+(\d+\.?\d*)\s+(\d+\.?\d*)"
-    matches = re.findall(pattern, text)
-
-    for match in matches:
-        items.append({
-            "quantity": int(match[0]),
-            "item_name": match[1].strip(),
-            "unit_price": float(match[2]),
-            "line_total": float(match[3])
-        })
-
-    return items
 
 def extract_key_details(text: str):
-    patient = re.search(r"Patient Name[:\-]?\s*(.*)", text)
-    hospital = re.search(r"Hospital Name[:\-]?\s*(.*)", text)
-    date = re.search(r"Date[:\-]?\s*(.*)", text)
-    gst = re.search(r"GST[:\-]?\s*(\d+\.?\d*)", text)
-    total = re.search(r"Total[:\-]?\s*(\d+\.?\d*)", text)
+
+    text_lower = text.lower()
+    lines = text.split("\n")
+
+    date_match = re.search(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", text)
+
+    gst = 0
+    total = 0
+
+    for line in lines:
+        line_lower = line.lower()
+
+        # Detect GST line
+        if "gst" in line_lower:
+            numbers = re.findall(r"\d+\.\d+|\d+", line)
+            if numbers:
+                gst = float(numbers[-1])
+
+        # Detect Total line
+        if "total" in line_lower and "sub" not in line_lower:
+            numbers = re.findall(r"\d+\.\d+|\d+", line)
+            if numbers:
+                total = float(numbers[-1])
 
     return {
-        "patient_name": patient.group(1).strip() if patient else "Not Found",
-        "hospital_name": hospital.group(1).strip() if hospital else "Not Found",
-        "date": date.group(1).strip() if date else "Not Found",
-        "gst": float(gst.group(1)) if gst else 0,
-        "total": float(total.group(1)) if total else 0
+        "patient_name": "Not Detected",
+        "hospital_name": "Not Detected",
+        "date": date_match.group(0) if date_match else "Not Detected",
+        "gst": gst,
+        "total": total
     }
 
 # ==============================
-# VALIDATION ENGINE
+# LINE ITEM EXTRACTION (SAFER)
+# ==============================
+
+def extract_line_items(text: str):
+
+    items = []
+    lines = text.split("\n")
+
+    for line in lines:
+        numbers = re.findall(r"\d+\.\d+|\d+", line)
+
+        # Must have at least 3 numbers (qty, price, total)
+        if len(numbers) >= 3:
+            try:
+                qty = int(float(numbers[0]))
+                unit_price = float(numbers[-2])
+                line_total = float(numbers[-1])
+
+                # Extract name (remove numbers from line)
+                name = re.sub(r"\d+\.\d+|\d+", "", line).strip()
+
+                if len(name) > 2:
+                    items.append({
+                        "quantity": qty,
+                        "item_name": name,
+                        "unit_price": unit_price,
+                        "line_total": line_total
+                    })
+            except:
+                continue
+
+    return items
+
+# ==============================
+# VALIDATION ENGINE (BALANCED)
 # ==============================
 
 def validate_bill(data: Dict, items: List[Dict], text: str):
+
     errors = []
     fraud_score = 0
 
-    # Missing fields
-    for key, value in data.items():
-        if value in ["Not Found", "", 0]:
-            errors.append(f"Missing or invalid {key}")
-            fraud_score += 15
+    # Total missing
+    if data["total"] == 0:
+        errors.append("Total amount not detected")
+        fraud_score += 30
 
-    # GST validation (18%)
-    subtotal_match = re.search(r"Sub Total[:\-]?\s*(\d+\.?\d*)", text)
-    if subtotal_match:
+    # GST mismatch (if subtotal present)
+    subtotal_match = re.search(r"sub\s*total.*?(\d+\.?\d*)", text.lower())
+    if subtotal_match and data["gst"] > 0:
         subtotal = float(subtotal_match.group(1))
         expected_gst = subtotal * 0.18
         if abs(expected_gst - data["gst"]) > 5:
             errors.append("GST calculation mismatch")
-            fraud_score += 25
-
-    # Duplicate items
-    item_names = [item["item_name"] for item in items]
-    if len(item_names) != len(set(item_names)):
-        errors.append("Duplicate billing items detected")
-        fraud_score += 20
+            fraud_score += 20
 
     # Line total validation
     for item in items:
         calculated = item["quantity"] * item["unit_price"]
         if abs(calculated - item["line_total"]) > 2:
-            errors.append(f"Line total mismatch for {item['item_name']}")
-            fraud_score += 15
+            errors.append(f"Line mismatch: {item['item_name']}")
+            fraud_score += 10
+
+    # Duplicate items
+    names = [item["item_name"] for item in items]
+    if len(names) != len(set(names)):
+        errors.append("Duplicate items detected")
+        fraud_score += 10
 
     return errors, min(fraud_score, 100)
 
@@ -110,13 +150,14 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file:
+
     with tempfile.NamedTemporaryFile(delete=False) as tmp:
         tmp.write(uploaded_file.read())
         temp_path = tmp.name
 
-    st.info("Processing bill using AI OCR...")
+    st.info("🔎 Processing bill using AI OCR...")
 
-    text = extract_text_from_image(temp_path)
+    text = extract_text(temp_path)
 
     extracted_data = extract_key_details(text)
     line_items = extract_line_items(text)
@@ -131,7 +172,7 @@ if uploaded_file:
     st.subheader("🔍 Validation Results")
 
     if validation_errors:
-        st.error(validation_errors)
+        st.warning(validation_errors)
     else:
         st.success("Bill validated successfully!")
 
