@@ -2,12 +2,9 @@ import streamlit as st
 import easyocr
 import tempfile
 import os
-import re
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
-from openpyxl import Workbook
 
 # ==============================
 # PAGE CONFIG
@@ -15,7 +12,7 @@ from openpyxl import Workbook
 
 st.set_page_config(page_title="MedBill Guard AI", layout="centered")
 st.title("🏥 MedBill Guard AI")
-st.write("Upload hospital bill to generate structured PDF & Excel report")
+st.write("Upload hospital bill to generate clean digitized PDF report")
 
 # ==============================
 # LOAD OCR
@@ -36,169 +33,40 @@ def extract_text(path):
     return "\n".join([text[1] for text in results])
 
 # ==============================
-# STRUCTURED EXTRACTION
+# CLEAN TEXT
 # ==============================
 
-def extract_structured_data(text):
-
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
-
-    patient = "Not Detected"
-    hospital = "Not Detected"
-    date = "Not Detected"
-    gst = 0
-    total = 0
-    items = []
-
-    # -------- DATE --------
-    date_match = re.search(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", text)
-    if date_match:
-        date = date_match.group(0)
-
-    # -------- PATIENT --------
-    for line in lines[:15]:
-        lower = line.lower()
-        if "patient" in lower and "name" in lower:
-            if ":" in line:
-                name_part = line.split(":", 1)[1]
-            else:
-                name_part = re.sub(r"(?i)patient\s*name", "", line)
-
-            name_part = re.sub(r"[^A-Za-z ]", "", name_part).strip()
-            if len(name_part.split()) >= 2:
-                patient = name_part
-                break
-
-    # -------- HOSPITAL --------
-    for line in lines[:10]:
-        if any(word in line.lower() for word in ["hospital", "clinic", "medical"]):
-            hospital = line
-            break
-
-    # -------- GST --------
-    for line in lines:
-        if "gst" in line.lower():
-            nums = re.findall(r"\d+\.\d+|\d+", line)
-            if nums:
-                gst = float(nums[-1])
-                break
-
-    # -------- TOTAL --------
-    for line in lines:
-        lower = line.lower()
-        if any(word in lower for word in ["grand total", "total amount", "net total", "total"]):
-            nums = re.findall(r"\d+\.\d+|\d+", line)
-            if nums:
-                total = float(nums[-1])
-                break
-
-    # -------- LINE ITEMS --------
-    for line in lines:
-        nums = re.findall(r"\d+\.\d+|\d+", line)
-        if len(nums) >= 3:
-            try:
-                qty = int(float(nums[0]))
-                unit_price = float(nums[-2])
-                line_total = float(nums[-1])
-
-                if 1 <= qty <= 100 and unit_price < 100000:
-                    name = re.sub(r"\d+\.\d+|\d+", "", line).strip()
-                    if len(name) > 3:
-                        items.append([
-                            qty,
-                            name,
-                            unit_price,
-                            line_total
-                        ])
-            except:
-                continue
-
-    return patient, hospital, date, gst, total, items
+def clean_text(text):
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+    return lines
 
 # ==============================
 # PDF GENERATION
 # ==============================
 
-def generate_pdf(patient, hospital, date, gst, total, items, raw_text):
+def generate_pdf(lines):
 
     temp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     doc = SimpleDocTemplate(temp_pdf.name, pagesize=letter)
     elements = []
     styles = getSampleStyleSheet()
 
-    elements.append(Paragraph("<b>MedBill Guard AI - Structured Report</b>", styles["Title"]))
+    elements.append(Paragraph("<b>MedBill Guard AI - Digitized Bill Report</b>", styles["Title"]))
     elements.append(Spacer(1, 20))
 
-    elements.append(Paragraph(f"<b>Patient:</b> {patient}", styles["Normal"]))
-    elements.append(Paragraph(f"<b>Hospital:</b> {hospital}", styles["Normal"]))
-    elements.append(Paragraph(f"<b>Date:</b> {date}", styles["Normal"]))
-    elements.append(Paragraph(f"<b>GST:</b> {gst}", styles["Normal"]))
-    elements.append(Paragraph(f"<b>Total:</b> {total}", styles["Normal"]))
-    elements.append(Spacer(1, 25))
+    elements.append(Paragraph("<b>Complete Extracted Bill Content</b>", styles["Heading2"]))
+    elements.append(Spacer(1, 15))
 
-    # Line Items Table
-    if items:
-        table_data = [["Qty", "Item Name", "Unit Price", "Line Total"]] + items
-        table = Table(table_data, repeatRows=1)
+    for line in lines:
+        elements.append(Paragraph(line, styles["Normal"]))
+        elements.append(Spacer(1, 8))
 
-        table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-            ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
-            ("FONTSIZE", (0, 0), (-1, -1), 8),
-        ]))
-
-        elements.append(table)
-        elements.append(Spacer(1, 25))
-
-    # OCR Text Table
-    elements.append(Paragraph("<b>Original Extracted Bill Text</b>", styles["Heading2"]))
-    elements.append(Spacer(1, 10))
-
-    raw_lines = raw_text.split("\n")
-    raw_table_data = [["Line No", "OCR Text"]]
-
-    for idx, line in enumerate(raw_lines, start=1):
-        raw_table_data.append([str(idx), line])
-
-    raw_table = Table(raw_table_data, repeatRows=1, colWidths=[50, 450])
-
-    raw_table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-        ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-        ("FONTSIZE", (0, 0), (-1, -1), 7),
-    ]))
-
-    elements.append(raw_table)
+    elements.append(Spacer(1, 20))
+    elements.append(Paragraph("<b>End of Report</b>", styles["Normal"]))
 
     doc.build(elements)
+
     return temp_pdf.name
-
-# ==============================
-# EXCEL GENERATION
-# ==============================
-
-def generate_excel(patient, hospital, date, gst, total, items):
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Bill Data"
-
-    ws.append(["Patient Name", patient])
-    ws.append(["Hospital Name", hospital])
-    ws.append(["Date", date])
-    ws.append(["GST", gst])
-    ws.append(["Total", total])
-    ws.append([])
-
-    ws.append(["Quantity", "Item Name", "Unit Price", "Line Total"])
-
-    for item in items:
-        ws.append(item)
-
-    temp_excel = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
-    wb.save(temp_excel.name)
-
-    return temp_excel.name
 
 # ==============================
 # UI
@@ -218,27 +86,18 @@ if uploaded_file:
     st.info("🔎 Processing bill...")
 
     raw_text = extract_text(temp_path)
-    patient, hospital, date, gst, total, items = extract_structured_data(raw_text)
+    cleaned_lines = clean_text(raw_text)
 
-    pdf_path = generate_pdf(patient, hospital, date, gst, total, items, raw_text)
-    excel_path = generate_excel(patient, hospital, date, gst, total, items)
+    pdf_path = generate_pdf(cleaned_lines)
 
-    st.success("✅ Report Generated Successfully")
+    st.success("✅ Digitized PDF Generated Successfully")
 
     with open(pdf_path, "rb") as f:
         st.download_button(
-            label="⬇ Download PDF Report",
+            label="⬇ Download Clean Digitized PDF",
             data=f,
-            file_name="MedBill_Report.pdf",
+            file_name="Digitized_Bill_Report.pdf",
             mime="application/pdf"
-        )
-
-    with open(excel_path, "rb") as f:
-        st.download_button(
-            label="⬇ Download Excel Sheet",
-            data=f,
-            file_name="MedBill_Data.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
     os.remove(temp_path)
