@@ -7,7 +7,6 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
-from reportlab.lib.units import inch
 from openpyxl import Workbook
 
 # ==============================
@@ -19,7 +18,7 @@ st.title("🏥 MedBill Guard AI")
 st.write("Upload hospital bill to generate structured PDF & Excel report")
 
 # ==============================
-# LOAD OCR MODEL
+# LOAD OCR
 # ==============================
 
 @st.cache_resource
@@ -37,12 +36,13 @@ def extract_text(path):
     return "\n".join([text[1] for text in results])
 
 # ==============================
-# STRUCTURED DATA EXTRACTION
+# STRUCTURED EXTRACTION
 # ==============================
 
 def extract_structured_data(text):
 
     lines = text.split("\n")
+
     patient = "Not Detected"
     hospital = "Not Detected"
     date = "Not Detected"
@@ -50,7 +50,7 @@ def extract_structured_data(text):
     total = 0
     items = []
 
-    # Date detection
+    # -------- DATE --------
     date_match = re.search(
         r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b\d{1,2}\s+[A-Za-z]+\s+\d{4}\b",
         text
@@ -58,15 +58,35 @@ def extract_structured_data(text):
     if date_match:
         date = date_match.group(0)
 
+    # -------- PATIENT --------
     for line in lines:
         lower = line.lower()
 
-        if "patient" in lower:
-            patient = line.strip()
+        if "patient" in lower and "name" in lower:
+            if ":" in line:
+                name_part = line.split(":", 1)[1]
+            else:
+                name_part = re.sub(r"(?i)patient\s*name", "", line)
+
+            name_part = re.sub(r"[^A-Za-z ]", "", name_part).strip()
+
+            if len(name_part.split()) >= 2:
+                patient = name_part
+                break
+
+    # -------- HOSPITAL --------
+    for line in lines:
+        lower = line.lower()
 
         if any(word in lower for word in ["hospital", "clinic", "medical"]):
-            hospital = line.strip()
+            cleaned = re.sub(r"[^A-Za-z ]", "", line).strip()
+            if len(cleaned.split()) >= 2:
+                hospital = cleaned
+                break
 
+    # -------- GST & TOTAL --------
+    for line in lines:
+        lower = line.lower()
         numbers = re.findall(r"\d+\.\d+|\d+", line)
         numbers = [float(n) for n in numbers]
 
@@ -76,15 +96,16 @@ def extract_structured_data(text):
         if any(word in lower for word in ["total", "grand", "net"]) and numbers:
             total = max(numbers)
 
-    # Fallback total
+    # fallback total detection
     if total == 0:
         all_numbers = re.findall(r"\d+\.\d+|\d+", text)
         if all_numbers:
             total = max([float(n) for n in all_numbers])
 
-    # Line Items
+    # -------- LINE ITEMS --------
     for line in lines:
         numbers = re.findall(r"\d+\.\d+|\d+", line)
+
         if len(numbers) >= 3:
             try:
                 qty = int(float(numbers[0]))
@@ -93,6 +114,7 @@ def extract_structured_data(text):
 
                 if 1 <= qty <= 100:
                     name = re.sub(r"\d+\.\d+|\d+", "", line).strip()
+
                     if len(name) > 3:
                         items.append([
                             qty,
@@ -116,23 +138,18 @@ def generate_pdf(patient, hospital, date, gst, total, items, raw_text):
     elements = []
     styles = getSampleStyleSheet()
 
-    # Title
     elements.append(Paragraph("<b>MedBill Guard AI - Structured Report</b>", styles["Title"]))
-    elements.append(Spacer(1, 0.3 * inch))
+    elements.append(Spacer(1, 15))
 
-    # Structured Info
     elements.append(Paragraph(f"<b>Patient:</b> {patient}", styles["Normal"]))
     elements.append(Paragraph(f"<b>Hospital:</b> {hospital}", styles["Normal"]))
     elements.append(Paragraph(f"<b>Date:</b> {date}", styles["Normal"]))
     elements.append(Paragraph(f"<b>GST:</b> {gst}", styles["Normal"]))
     elements.append(Paragraph(f"<b>Total:</b> {total}", styles["Normal"]))
-    elements.append(Spacer(1, 0.3 * inch))
+    elements.append(Spacer(1, 20))
 
     # Line Items Table
     if items:
-        elements.append(Paragraph("<b>Extracted Line Items</b>", styles["Heading2"]))
-        elements.append(Spacer(1, 0.2 * inch))
-
         table_data = [["Qty", "Item Name", "Unit Price", "Line Total"]] + items
         table = Table(table_data, repeatRows=1)
 
@@ -143,11 +160,11 @@ def generate_pdf(patient, hospital, date, gst, total, items, raw_text):
         ]))
 
         elements.append(table)
-        elements.append(Spacer(1, 0.5 * inch))
+        elements.append(Spacer(1, 25))
 
-    # OCR Raw Text Table
-    elements.append(Paragraph("<b>Original Extracted Bill Text (Table View)</b>", styles["Heading2"]))
-    elements.append(Spacer(1, 0.2 * inch))
+    # OCR TEXT TABLE
+    elements.append(Paragraph("<b>Original Extracted Bill Text</b>", styles["Heading2"]))
+    elements.append(Spacer(1, 10))
 
     raw_lines = raw_text.split("\n")
     raw_table_data = [["Line No", "OCR Text"]]
