@@ -24,7 +24,7 @@ def load_reader():
 reader = load_reader()
 
 # ==============================
-# OCR
+# OCR FUNCTION
 # ==============================
 
 def extract_text(path):
@@ -32,7 +32,7 @@ def extract_text(path):
     return "\n".join([text[1] for text in results])
 
 # ==============================
-# SMART FIELD EXTRACTION
+# FIELD EXTRACTION
 # ==============================
 
 def extract_key_details(text: str):
@@ -40,32 +40,23 @@ def extract_key_details(text: str):
     lines = text.split("\n")
     text_lower = text.lower()
 
-    # DATE detection (multiple formats)
-    date_match = re.search(
-        r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b\d{1,2}\s+[A-Za-z]+\s+\d{4}\b",
-        text
-    )
-
     total = 0
     gst = 0
 
     for line in lines:
         lower = line.lower()
-
         numbers = re.findall(r"\d+\.\d+|\d+", line)
         numbers = [float(n) for n in numbers]
 
-        # Detect total using keywords
         if any(word in lower for word in ["total", "grand", "amount", "net"]):
             if numbers:
                 total = max(numbers)
 
-        # Detect GST
         if "gst" in lower or "tax" in lower:
             if numbers:
                 gst = max(numbers)
 
-    # Fallback: if total still zero, pick largest number in document
+    # fallback total detection
     if total == 0:
         all_numbers = re.findall(r"\d+\.\d+|\d+", text)
         all_numbers = [float(n) for n in all_numbers]
@@ -73,15 +64,15 @@ def extract_key_details(text: str):
             total = max(all_numbers)
 
     return {
-        "patient_name": "Auto Detection Limited",
-        "hospital_name": "Auto Detection Limited",
-        "date": date_match.group(0) if date_match else "Not Detected",
+        "patient_name": "Auto Detected",
+        "hospital_name": "Auto Detected",
+        "date": "Auto Detection Limited",
         "gst": gst,
         "total": total
     }
 
 # ==============================
-# LINE ITEM EXTRACTION (IMPROVED)
+# SAFE LINE ITEM EXTRACTION
 # ==============================
 
 def extract_line_items(text: str):
@@ -90,49 +81,68 @@ def extract_line_items(text: str):
     lines = text.split("\n")
 
     for line in lines:
+
         numbers = re.findall(r"\d+\.\d+|\d+", line)
+        if len(numbers) < 3:
+            continue
 
-        if len(numbers) >= 2:
-            try:
-                qty = int(float(numbers[0]))
-                unit_price = float(numbers[-2])
-                line_total = float(numbers[-1])
+        try:
+            qty = int(float(numbers[0]))
+            unit_price = float(numbers[-2])
+            line_total = float(numbers[-1])
 
-                name = re.sub(r"\d+\.\d+|\d+", "", line).strip()
-
-                if len(name) > 3:
-                    items.append({
-                        "quantity": qty,
-                        "item_name": name,
-                        "unit_price": unit_price,
-                        "line_total": line_total
-                    })
-            except:
+            # FILTER unrealistic values
+            if qty <= 0 or qty > 100:
                 continue
+
+            if unit_price <= 0 or unit_price > 100000:
+                continue
+
+            if line_total <= 0 or line_total > 1000000:
+                continue
+
+            name = re.sub(r"\d+\.\d+|\d+", "", line).strip()
+
+            # FILTER garbage names
+            if len(name) < 3:
+                continue
+
+            items.append({
+                "quantity": qty,
+                "item_name": name,
+                "unit_price": unit_price,
+                "line_total": line_total
+            })
+
+        except:
+            continue
 
     return items
 
 # ==============================
-# VALIDATION
+# VALIDATION ENGINE (SAFE)
 # ==============================
 
-def validate_bill(data: Dict, items: List[Dict], text: str):
+def validate_bill(data: Dict, items: List[Dict]):
 
     errors = []
     fraud_score = 0
 
+    # Check total
     if data["total"] == 0:
         errors.append("Total amount not detected")
         fraud_score += 30
 
+    # Validate line totals
     for item in items:
         calculated = item["quantity"] * item["unit_price"]
 
-        # Allow small OCR tolerance
+        # Allow OCR tolerance
         if abs(calculated - item["line_total"]) > 5:
             errors.append(f"Line mismatch: {item['item_name']}")
             fraud_score += 10
 
+    # Duplicate items
     names = [item["item_name"] for item in items]
     if len(names) != len(set(names)):
         errors.append("Duplicate items detected")
@@ -161,7 +171,7 @@ if uploaded_file:
 
     extracted_data = extract_key_details(text)
     line_items = extract_line_items(text)
-    validation_errors, fraud_score = validate_bill(extracted_data, line_items, text)
+    validation_errors, fraud_score = validate_bill(extracted_data, line_items)
 
     st.subheader("📄 Extracted Data")
     st.json(extracted_data)
