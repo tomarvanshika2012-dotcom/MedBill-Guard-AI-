@@ -3,12 +3,12 @@ import easyocr
 import tempfile
 import os
 import re
-import json
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Preformatted
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import inch
+from openpyxl import Workbook
 
 # ==============================
 # PAGE CONFIG
@@ -16,7 +16,7 @@ from reportlab.lib.units import inch
 
 st.set_page_config(page_title="MedBill Guard AI", layout="centered")
 st.title("🏥 MedBill Guard AI")
-st.write("Upload hospital bill to generate structured PDF report")
+st.write("Upload hospital bill to generate structured PDF & Excel report")
 
 # ==============================
 # LOAD OCR
@@ -37,7 +37,7 @@ def extract_text(path):
     return "\n".join([text[1] for text in results])
 
 # ==============================
-# STRUCTURED EXTRACTION
+# DATA EXTRACTION
 # ==============================
 
 def extract_structured_data(text):
@@ -50,7 +50,7 @@ def extract_structured_data(text):
     total = 0
     items = []
 
-    # Date
+    # Date detection
     date_match = re.search(
         r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b\d{1,2}\s+[A-Za-z]+\s+\d{4}\b",
         text
@@ -64,7 +64,7 @@ def extract_structured_data(text):
         if "patient" in lower:
             patient = line.strip()
 
-        if any(word in lower for word in ["hospital", "clinic"]):
+        if any(word in lower for word in ["hospital", "clinic", "medical"]):
             hospital = line.strip()
 
         numbers = re.findall(r"\d+\.\d+|\d+", line)
@@ -81,7 +81,7 @@ def extract_structured_data(text):
         if all_numbers:
             total = max([float(n) for n in all_numbers])
 
-    # Items
+    # Line Items
     for line in lines:
         numbers = re.findall(r"\d+\.\d+|\d+", line)
         if len(numbers) >= 3:
@@ -89,6 +89,7 @@ def extract_structured_data(text):
                 qty = int(float(numbers[0]))
                 unit_price = float(numbers[-2])
                 line_total = float(numbers[-1])
+
                 if 1 <= qty <= 100:
                     name = re.sub(r"\d+\.\d+|\d+", "", line).strip()
                     if len(name) > 3:
@@ -107,7 +108,7 @@ def extract_structured_data(text):
 # PDF GENERATION
 # ==============================
 
-def generate_pdf(patient, hospital, date, gst, total, items):
+def generate_pdf(patient, hospital, date, gst, total, items, raw_text):
 
     temp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     doc = SimpleDocTemplate(temp_pdf.name, pagesize=letter)
@@ -117,6 +118,7 @@ def generate_pdf(patient, hospital, date, gst, total, items):
     elements.append(Paragraph("<b>MedBill Guard AI - Structured Report</b>", styles["Title"]))
     elements.append(Spacer(1, 0.3 * inch))
 
+    # Extracted Information
     elements.append(Paragraph(f"<b>Patient:</b> {patient}", styles["Normal"]))
     elements.append(Paragraph(f"<b>Hospital:</b> {hospital}", styles["Normal"]))
     elements.append(Paragraph(f"<b>Date:</b> {date}", styles["Normal"]))
@@ -124,22 +126,52 @@ def generate_pdf(patient, hospital, date, gst, total, items):
     elements.append(Paragraph(f"<b>Total:</b> {total}", styles["Normal"]))
     elements.append(Spacer(1, 0.3 * inch))
 
-    # Table
+    # Line Items Table
     if items:
         table_data = [["Qty", "Item Name", "Unit Price", "Line Total"]] + items
         table = Table(table_data, repeatRows=1)
-
         table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.grey),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
             ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
-            ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
-            ("FONTSIZE", (0, 0), (-1, -1), 8)
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
         ]))
-
         elements.append(table)
+        elements.append(Spacer(1, 0.5 * inch))
+
+    # Raw OCR Text (Original Bill Content)
+    elements.append(Paragraph("<b>Original Extracted Bill Text:</b>", styles["Heading2"]))
+    elements.append(Spacer(1, 0.2 * inch))
+    elements.append(Preformatted(raw_text, styles["Code"]))
 
     doc.build(elements)
     return temp_pdf.name
+
+# ==============================
+# EXCEL GENERATION
+# ==============================
+
+def generate_excel(patient, hospital, date, gst, total, items):
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Bill Data"
+
+    ws.append(["Patient Name", patient])
+    ws.append(["Hospital Name", hospital])
+    ws.append(["Date", date])
+    ws.append(["GST", gst])
+    ws.append(["Total", total])
+    ws.append([])
+
+    ws.append(["Quantity", "Item Name", "Unit Price", "Line Total"])
+
+    for item in items:
+        ws.append(item)
+
+    temp_excel = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
+    wb.save(temp_excel.name)
+
+    return temp_excel.name
 
 # ==============================
 # UI
@@ -158,18 +190,31 @@ if uploaded_file:
 
     st.info("🔎 Processing bill...")
 
-    text = extract_text(temp_path)
-    patient, hospital, date, gst, total, items = extract_structured_data(text)
+    raw_text = extract_text(temp_path)
+    patient, hospital, date, gst, total, items = extract_structured_data(raw_text)
 
-    pdf_path = generate_pdf(patient, hospital, date, gst, total, items)
+    # Generate PDF
+    pdf_path = generate_pdf(patient, hospital, date, gst, total, items, raw_text)
+
+    # Generate Excel
+    excel_path = generate_excel(patient, hospital, date, gst, total, items)
+
+    st.success("✅ Report Generated Successfully")
 
     with open(pdf_path, "rb") as f:
-        st.success("✅ Report Generated Successfully")
         st.download_button(
-            label="⬇ Download Extracted Structured PDF",
+            label="⬇ Download PDF Report",
             data=f,
-            file_name="MedBill_Extracted_Report.pdf",
+            file_name="MedBill_Report.pdf",
             mime="application/pdf"
+        )
+
+    with open(excel_path, "rb") as f:
+        st.download_button(
+            label="⬇ Download Excel Sheet",
+            data=f,
+            file_name="MedBill_Data.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
     os.remove(temp_path)
