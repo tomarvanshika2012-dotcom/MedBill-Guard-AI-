@@ -1,4 +1,4 @@
 streamlit
-pytesseract
-pdf2image
+easyocr
 Pillow
+numpy
