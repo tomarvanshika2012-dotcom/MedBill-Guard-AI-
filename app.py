@@ -14,7 +14,7 @@ st.title("🏥 MedBill Guard AI")
 st.write("AI-Powered Hospital Bill OCR & Smart Validation System")
 
 # ==============================
-# LOAD OCR MODEL
+# LOAD OCR
 # ==============================
 
 @st.cache_resource
@@ -24,7 +24,7 @@ def load_reader():
 reader = load_reader()
 
 # ==============================
-# OCR FUNCTION
+# OCR
 # ==============================
 
 def extract_text(path):
@@ -37,39 +37,51 @@ def extract_text(path):
 
 def extract_key_details(text: str):
 
-    text_lower = text.lower()
     lines = text.split("\n")
+    text_lower = text.lower()
 
-    date_match = re.search(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", text)
+    # DATE detection (multiple formats)
+    date_match = re.search(
+        r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b\d{1,2}\s+[A-Za-z]+\s+\d{4}\b",
+        text
+    )
 
-    gst = 0
     total = 0
+    gst = 0
 
     for line in lines:
-        line_lower = line.lower()
+        lower = line.lower()
 
-        # Detect GST line
-        if "gst" in line_lower:
-            numbers = re.findall(r"\d+\.\d+|\d+", line)
-            if numbers:
-                gst = float(numbers[-1])
+        numbers = re.findall(r"\d+\.\d+|\d+", line)
+        numbers = [float(n) for n in numbers]
 
-        # Detect Total line
-        if "total" in line_lower and "sub" not in line_lower:
-            numbers = re.findall(r"\d+\.\d+|\d+", line)
+        # Detect total using keywords
+        if any(word in lower for word in ["total", "grand", "amount", "net"]):
             if numbers:
-                total = float(numbers[-1])
+                total = max(numbers)
+
+        # Detect GST
+        if "gst" in lower or "tax" in lower:
+            if numbers:
+                gst = max(numbers)
+
+    # Fallback: if total still zero, pick largest number in document
+    if total == 0:
+        all_numbers = re.findall(r"\d+\.\d+|\d+", text)
+        all_numbers = [float(n) for n in all_numbers]
+        if all_numbers:
+            total = max(all_numbers)
 
     return {
-        "patient_name": "Not Detected",
-        "hospital_name": "Not Detected",
+        "patient_name": "Auto Detection Limited",
+        "hospital_name": "Auto Detection Limited",
         "date": date_match.group(0) if date_match else "Not Detected",
         "gst": gst,
         "total": total
     }
 
 # ==============================
-# LINE ITEM EXTRACTION (SAFER)
+# LINE ITEM EXTRACTION (IMPROVED)
 # ==============================
 
 def extract_line_items(text: str):
@@ -80,17 +92,15 @@ def extract_line_items(text: str):
     for line in lines:
         numbers = re.findall(r"\d+\.\d+|\d+", line)
 
-        # Must have at least 3 numbers (qty, price, total)
-        if len(numbers) >= 3:
+        if len(numbers) >= 2:
             try:
                 qty = int(float(numbers[0]))
                 unit_price = float(numbers[-2])
                 line_total = float(numbers[-1])
 
-                # Extract name (remove numbers from line)
                 name = re.sub(r"\d+\.\d+|\d+", "", line).strip()
 
-                if len(name) > 2:
+                if len(name) > 3:
                     items.append({
                         "quantity": qty,
                         "item_name": name,
@@ -103,7 +113,7 @@ def extract_line_items(text: str):
     return items
 
 # ==============================
-# VALIDATION ENGINE (BALANCED)
+# VALIDATION
 # ==============================
 
 def validate_bill(data: Dict, items: List[Dict], text: str):
@@ -111,28 +121,18 @@ def validate_bill(data: Dict, items: List[Dict], text: str):
     errors = []
     fraud_score = 0
 
-    # Total missing
     if data["total"] == 0:
         errors.append("Total amount not detected")
         fraud_score += 30
 
-    # GST mismatch (if subtotal present)
-    subtotal_match = re.search(r"sub\s*total.*?(\d+\.?\d*)", text.lower())
-    if subtotal_match and data["gst"] > 0:
-        subtotal = float(subtotal_match.group(1))
-        expected_gst = subtotal * 0.18
-        if abs(expected_gst - data["gst"]) > 5:
-            errors.append("GST calculation mismatch")
-            fraud_score += 20
-
-    # Line total validation
     for item in items:
         calculated = item["quantity"] * item["unit_price"]
-        if abs(calculated - item["line_total"]) > 2:
+
+        # Allow small OCR tolerance
+        if abs(calculated - item["line_total"]) > 5:
             errors.append(f"Line mismatch: {item['item_name']}")
             fraud_score += 10
 
-    # Duplicate items
     names = [item["item_name"] for item in items]
     if len(names) != len(set(names)):
         errors.append("Duplicate items detected")
