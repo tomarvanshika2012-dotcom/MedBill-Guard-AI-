@@ -1,7 +1,4 @@
-fastapi
-uvicorn
+streamlit
 pytesseract
 pdf2image
 Pillow
-python-multipart
-PyJWT
