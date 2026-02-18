@@ -3,7 +3,7 @@ import easyocr
 import tempfile
 import os
 import re
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Preformatted
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
@@ -19,7 +19,7 @@ st.title("🏥 MedBill Guard AI")
 st.write("Upload hospital bill to generate structured PDF & Excel report")
 
 # ==============================
-# LOAD OCR
+# LOAD OCR MODEL
 # ==============================
 
 @st.cache_resource
@@ -37,7 +37,7 @@ def extract_text(path):
     return "\n".join([text[1] for text in results])
 
 # ==============================
-# DATA EXTRACTION
+# STRUCTURED DATA EXTRACTION
 # ==============================
 
 def extract_structured_data(text):
@@ -76,6 +76,7 @@ def extract_structured_data(text):
         if any(word in lower for word in ["total", "grand", "net"]) and numbers:
             total = max(numbers)
 
+    # Fallback total
     if total == 0:
         all_numbers = re.findall(r"\d+\.\d+|\d+", text)
         if all_numbers:
@@ -115,10 +116,11 @@ def generate_pdf(patient, hospital, date, gst, total, items, raw_text):
     elements = []
     styles = getSampleStyleSheet()
 
+    # Title
     elements.append(Paragraph("<b>MedBill Guard AI - Structured Report</b>", styles["Title"]))
     elements.append(Spacer(1, 0.3 * inch))
 
-    # Extracted Information
+    # Structured Info
     elements.append(Paragraph(f"<b>Patient:</b> {patient}", styles["Normal"]))
     elements.append(Paragraph(f"<b>Hospital:</b> {hospital}", styles["Normal"]))
     elements.append(Paragraph(f"<b>Date:</b> {date}", styles["Normal"]))
@@ -128,20 +130,40 @@ def generate_pdf(patient, hospital, date, gst, total, items, raw_text):
 
     # Line Items Table
     if items:
+        elements.append(Paragraph("<b>Extracted Line Items</b>", styles["Heading2"]))
+        elements.append(Spacer(1, 0.2 * inch))
+
         table_data = [["Qty", "Item Name", "Unit Price", "Line Total"]] + items
         table = Table(table_data, repeatRows=1)
+
         table.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
             ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
             ("FONTSIZE", (0, 0), (-1, -1), 8),
         ]))
+
         elements.append(table)
         elements.append(Spacer(1, 0.5 * inch))
 
-    # Raw OCR Text (Original Bill Content)
-    elements.append(Paragraph("<b>Original Extracted Bill Text:</b>", styles["Heading2"]))
+    # OCR Raw Text Table
+    elements.append(Paragraph("<b>Original Extracted Bill Text (Table View)</b>", styles["Heading2"]))
     elements.append(Spacer(1, 0.2 * inch))
-    elements.append(Preformatted(raw_text, styles["Code"]))
+
+    raw_lines = raw_text.split("\n")
+    raw_table_data = [["Line No", "OCR Text"]]
+
+    for idx, line in enumerate(raw_lines, start=1):
+        raw_table_data.append([str(idx), line])
+
+    raw_table = Table(raw_table_data, repeatRows=1, colWidths=[50, 450])
+
+    raw_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+        ("FONTSIZE", (0, 0), (-1, -1), 7),
+    ]))
+
+    elements.append(raw_table)
 
     doc.build(elements)
     return temp_pdf.name
@@ -193,10 +215,7 @@ if uploaded_file:
     raw_text = extract_text(temp_path)
     patient, hospital, date, gst, total, items = extract_structured_data(raw_text)
 
-    # Generate PDF
     pdf_path = generate_pdf(patient, hospital, date, gst, total, items, raw_text)
-
-    # Generate Excel
     excel_path = generate_excel(patient, hospital, date, gst, total, items)
 
     st.success("✅ Report Generated Successfully")
