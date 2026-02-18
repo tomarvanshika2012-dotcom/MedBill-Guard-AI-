@@ -3,6 +3,14 @@ import easyocr
 import tempfile
 import os
 import re
+import json
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import Preformatted
+from reportlab.lib.units import inch
+from openpyxl import Workbook
 
 # ==============================
 # PAGE CONFIG
@@ -31,14 +39,12 @@ def extract_text(path):
     return "\n".join([text[1] for text in results])
 
 # ==============================
-# SMART FIELD EXTRACTION
+# DATA EXTRACTION
 # ==============================
 
 def extract_structured_data(text):
 
     lines = text.split("\n")
-    text_lower = text.lower()
-
     patient = "Not Detected"
     hospital = "Not Detected"
     date = "Not Detected"
@@ -46,7 +52,6 @@ def extract_structured_data(text):
     total = 0
     items = []
 
-    # ---------- DATE ----------
     date_match = re.search(
         r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b\d{1,2}\s+[A-Za-z]+\s+\d{4}\b",
         text
@@ -54,43 +59,29 @@ def extract_structured_data(text):
     if date_match:
         date = date_match.group(0)
 
-    # ---------- PATIENT ----------
-    for line in lines:
-        if any(word in line.lower() for word in ["patient", "name"]):
-            cleaned = re.sub(r"[^A-Za-z ]", "", line)
-            if len(cleaned) > 5:
-                patient = cleaned.strip()
-                break
-
-    # ---------- HOSPITAL ----------
-    for line in lines:
-        if any(word in line.lower() for word in ["hospital", "clinic", "medical"]):
-            cleaned = re.sub(r"[^A-Za-z ]", "", line)
-            if len(cleaned) > 5:
-                hospital = cleaned.strip()
-                break
-
-    # ---------- GST & TOTAL ----------
     for line in lines:
         lower = line.lower()
+
+        if "patient" in lower:
+            patient = line.strip()
+
+        if any(word in lower for word in ["hospital", "clinic"]):
+            hospital = line.strip()
+
         numbers = re.findall(r"\d+\.\d+|\d+", line)
         numbers = [float(n) for n in numbers]
 
-        if "gst" in lower or "tax" in lower:
-            if numbers:
-                gst = max(numbers)
+        if "gst" in lower and numbers:
+            gst = max(numbers)
 
-        if any(word in lower for word in ["total", "grand", "net amount"]):
-            if numbers:
-                total = max(numbers)
+        if any(word in lower for word in ["total", "grand", "net"]) and numbers:
+            total = max(numbers)
 
-    # Fallback total detection
     if total == 0:
         all_numbers = re.findall(r"\d+\.\d+|\d+", text)
         if all_numbers:
             total = max([float(n) for n in all_numbers])
 
-    # ---------- LINE ITEMS ----------
     for line in lines:
         numbers = re.findall(r"\d+\.\d+|\d+", line)
         if len(numbers) >= 3:
@@ -98,11 +89,8 @@ def extract_structured_data(text):
                 qty = int(float(numbers[0]))
                 unit_price = float(numbers[-2])
                 line_total = float(numbers[-1])
-
-                if 1 <= qty <= 100 and 1 <= unit_price <= 100000:
-                    name = re.sub(r"\d+\.\d+|\d+", "", line)
-                    name = re.sub(r"[^A-Za-z ]", "", name).strip()
-
+                if 1 <= qty <= 100:
+                    name = re.sub(r"\d+\.\d+|\d+", "", line).strip()
                     if len(name) > 3:
                         items.append({
                             "quantity": qty,
@@ -123,29 +111,58 @@ def extract_structured_data(text):
     }
 
 # ==============================
-# VALIDATION
+# PDF GENERATION
 # ==============================
 
-def validate_bill(data):
+def generate_pdf(data):
 
-    errors = []
-    fraud_score = 0
+    temp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    doc = SimpleDocTemplate(temp_pdf.name, pagesize=letter)
+    elements = []
+    styles = getSampleStyleSheet()
 
-    if data["total"] == 0:
-        errors.append("Total not detected")
-        fraud_score += 30
+    elements.append(Paragraph("<b>MedBill Guard AI - Extracted Report</b>", styles["Title"]))
+    elements.append(Spacer(1, 0.3 * inch))
+
+    formatted_json = json.dumps(data, indent=4)
+    elements.append(Preformatted(formatted_json, styles["Code"]))
+
+    doc.build(elements)
+    return temp_pdf.name
+
+# ==============================
+# EXCEL GENERATION
+# ==============================
+
+def generate_excel(data):
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Extracted Data"
+
+    # Header Info
+    ws.append(["Patient Name", data["patient_name"]])
+    ws.append(["Hospital Name", data["hospital_name"]])
+    ws.append(["Date", data["date"]])
+    ws.append(["GST", data["gst"]])
+    ws.append(["Total", data["total"]])
+    ws.append([])
+
+    # Line Items Table
+    ws.append(["Quantity", "Item Name", "Unit Price", "Line Total"])
 
     for item in data["items"]:
-        calculated = item["quantity"] * item["unit_price"]
-        if abs(calculated - item["line_total"]) > 10:
-            errors.append(f"Line mismatch: {item['item_name']}")
-            fraud_score += 10
+        ws.append([
+            item["quantity"],
+            item["item_name"],
+            item["unit_price"],
+            item["line_total"]
+        ])
 
-    if len(data["items"]) == 0:
-        errors.append("No valid line items detected")
-        fraud_score += 20
+    temp_excel = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
+    wb.save(temp_excel.name)
 
-    return errors, min(fraud_score, 100)
+    return temp_excel.name
 
 # ==============================
 # UI
@@ -165,28 +182,29 @@ if uploaded_file:
     st.info("🔎 Processing bill using AI OCR...")
 
     text = extract_text(temp_path)
-
     data = extract_structured_data(text)
-    validation_errors, fraud_score = validate_bill(data)
 
     st.subheader("📄 Extracted Structured Data")
     st.json(data)
 
-    st.subheader("🔍 Validation Results")
+    # PDF Download
+    pdf_path = generate_pdf(data)
+    with open(pdf_path, "rb") as f:
+        st.download_button(
+            label="⬇ Download as PDF",
+            data=f,
+            file_name="extracted_report.pdf",
+            mime="application/pdf"
+        )
 
-    if validation_errors:
-        st.warning(validation_errors)
-    else:
-        st.success("Bill validated successfully!")
-
-    st.subheader("🚨 Fraud Risk Score")
-    st.progress(fraud_score)
-
-    if fraud_score < 30:
-        st.success("Low Risk")
-    elif fraud_score < 70:
-        st.warning("Medium Risk")
-    else:
-        st.error("High Risk")
+    # Excel Download
+    excel_path = generate_excel(data)
+    with open(excel_path, "rb") as f:
+        st.download_button(
+            label="⬇ Download as Excel Sheet",
+            data=f,
+            file_name="extracted_data.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
     os.remove(temp_path)
