@@ -36,7 +36,7 @@ def extract_text(path):
     return "\n".join([text[1] for text in results])
 
 # ==============================
-# SMART STRUCTURED EXTRACTION
+# STRUCTURED EXTRACTION
 # ==============================
 
 def extract_structured_data(text):
@@ -55,10 +55,9 @@ def extract_structured_data(text):
     if date_match:
         date = date_match.group(0)
 
-    # -------- PATIENT (Search top area only) --------
+    # -------- PATIENT --------
     for line in lines[:15]:
         lower = line.lower()
-
         if "patient" in lower and "name" in lower:
             if ":" in line:
                 name_part = line.split(":", 1)[1]
@@ -66,12 +65,11 @@ def extract_structured_data(text):
                 name_part = re.sub(r"(?i)patient\s*name", "", line)
 
             name_part = re.sub(r"[^A-Za-z ]", "", name_part).strip()
-
             if len(name_part.split()) >= 2:
                 patient = name_part
                 break
 
-    # -------- HOSPITAL (Top area only) --------
+    # -------- HOSPITAL --------
     for line in lines[:10]:
         if any(word in line.lower() for word in ["hospital", "clinic", "medical"]):
             hospital = line
@@ -85,7 +83,7 @@ def extract_structured_data(text):
                 gst = float(nums[-1])
                 break
 
-    # -------- TOTAL (Strict only) --------
+    # -------- TOTAL --------
     for line in lines:
         lower = line.lower()
         if any(word in lower for word in ["grand total", "total amount", "net total", "total"]):
@@ -97,7 +95,6 @@ def extract_structured_data(text):
     # -------- LINE ITEMS --------
     for line in lines:
         nums = re.findall(r"\d+\.\d+|\d+", line)
-
         if len(nums) >= 3:
             try:
                 qty = int(float(nums[0]))
@@ -141,12 +138,107 @@ def generate_pdf(patient, hospital, date, gst, total, items, raw_text):
 
     # Line Items Table
     if items:
-        elements.append(Paragraph("<b>Extracted Line Items</b>", styles["Heading2"]))
-        elements.append(Spacer(1, 10))
-
         table_data = [["Qty", "Item Name", "Unit Price", "Line Total"]] + items
         table = Table(table_data, repeatRows=1)
 
         table.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-            ("GRID
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ]))
+
+        elements.append(table)
+        elements.append(Spacer(1, 25))
+
+    # OCR Text Table
+    elements.append(Paragraph("<b>Original Extracted Bill Text</b>", styles["Heading2"]))
+    elements.append(Spacer(1, 10))
+
+    raw_lines = raw_text.split("\n")
+    raw_table_data = [["Line No", "OCR Text"]]
+
+    for idx, line in enumerate(raw_lines, start=1):
+        raw_table_data.append([str(idx), line])
+
+    raw_table = Table(raw_table_data, repeatRows=1, colWidths=[50, 450])
+
+    raw_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+        ("FONTSIZE", (0, 0), (-1, -1), 7),
+    ]))
+
+    elements.append(raw_table)
+
+    doc.build(elements)
+    return temp_pdf.name
+
+# ==============================
+# EXCEL GENERATION
+# ==============================
+
+def generate_excel(patient, hospital, date, gst, total, items):
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Bill Data"
+
+    ws.append(["Patient Name", patient])
+    ws.append(["Hospital Name", hospital])
+    ws.append(["Date", date])
+    ws.append(["GST", gst])
+    ws.append(["Total", total])
+    ws.append([])
+
+    ws.append(["Quantity", "Item Name", "Unit Price", "Line Total"])
+
+    for item in items:
+        ws.append(item)
+
+    temp_excel = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
+    wb.save(temp_excel.name)
+
+    return temp_excel.name
+
+# ==============================
+# UI
+# ==============================
+
+uploaded_file = st.file_uploader(
+    "Upload Hospital Bill (Image Only)",
+    type=["png", "jpg", "jpeg"]
+)
+
+if uploaded_file:
+
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        tmp.write(uploaded_file.read())
+        temp_path = tmp.name
+
+    st.info("🔎 Processing bill...")
+
+    raw_text = extract_text(temp_path)
+    patient, hospital, date, gst, total, items = extract_structured_data(raw_text)
+
+    pdf_path = generate_pdf(patient, hospital, date, gst, total, items, raw_text)
+    excel_path = generate_excel(patient, hospital, date, gst, total, items)
+
+    st.success("✅ Report Generated Successfully")
+
+    with open(pdf_path, "rb") as f:
+        st.download_button(
+            label="⬇ Download PDF Report",
+            data=f,
+            file_name="MedBill_Report.pdf",
+            mime="application/pdf"
+        )
+
+    with open(excel_path, "rb") as f:
+        st.download_button(
+            label="⬇ Download Excel Sheet",
+            data=f,
+            file_name="MedBill_Data.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+    os.remove(temp_path)
